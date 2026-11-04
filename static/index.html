@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Route Buddy</title>
+<style>
+  :root { --ink:#1b1f23; --mute:#6b7280; --line:#e5e7eb; --accent:#0f766e; --bg:#fafaf9; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; color:var(--ink); background:var(--bg); display:flex; flex-direction:column; min-height:100vh; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:#fff; }
+  header h1 { margin:0; font-size:18px; } header span { color:var(--mute); font-size:13px; }
+  main { flex:1; display:grid; grid-template-columns: 1.3fr 1fr; gap:16px; padding:16px 20px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  section { background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; }
+  h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); }
+  .col { display:flex; flex-direction:column; gap:16px; }
+  #log { height:340px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
+  .msg { padding:8px 10px; border-radius:8px; white-space:pre-wrap; max-width:90%; }
+  .user { background:var(--accent); color:#fff; align-self:flex-end; }
+  .bot { background:#f3f4f6; align-self:flex-start; }
+  .err { background:#fef2f2; color:#991b1b; }
+  form { display:flex; gap:8px; }
+  input { flex:1; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  button { padding:9px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #tools { list-style:none; margin:0; padding:0; font:13px ui-monospace,monospace; display:flex; flex-direction:column; gap:4px; max-height:200px; overflow-y:auto; }
+  #tools li { display:flex; gap:8px; align-items:center; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#f59e0b; } .done .dot { background:#16a34a; }
+  ol#route { margin:0; padding-left:22px; } ol#route li { margin-bottom:8px; }
+  ol#route small { display:block; color:var(--mute); }
+  .empty { color:var(--mute); font-style:italic; }
+  footer { padding:14px 20px; border-top:1px solid var(--line); color:var(--mute); font-size:13px; text-align:center; }
+  footer a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header><h1>🗺️ Route Buddy</h1> <span>Ask for a short walking route. Try “a fun walk in Austin”.</span></header>
+<main>
+  <section>
+    <h2>Chat</h2>
+    <div id="log"></div>
+    <form id="form"><input id="input" placeholder="Plan me a walk in portland…" autocomplete="off"><button id="send">Send</button></form>
+  </section>
+  <div class="col">
+    <section><h2>Route</h2><div id="routebox"><p class="empty">No route yet.</p></div></section>
+    <section><h2>Tool calls</h2><ul id="tools"><li class="empty">None yet.</li></ul></section>
+  </div>
+</main>
+<footer>
+  Built with <a href="https://github.com/microsoft/agent-framework">Microsoft Agent Framework</a> +
+  <a href="https://docs.ag-ui.com">AG-UI</a>, powered by
+  <a href="https://www.anthropic.com/claude/haiku">Claude Haiku</a>, data from
+  <a href="https://likelocal-production.up.railway.app">likelocal</a> ·
+  <a href="https://github.com/AQuantumArchitect/route-buddy">source</a>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const threadId = crypto.randomUUID();
+let messages = [];   // AG-UI message history we send each run
+let state = {};      // shared state (route)
+
+// Minimal RFC 6902 applier: add / replace / remove, enough for AG-UI STATE_DELTA.
+function applyPatch(doc, ops) {
+  for (const op of ops) {
+    const parts = op.path.split("/").slice(1).map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
+    if (!parts.length) { doc = op.value; continue; }
+    let t = doc;
+    for (const p of parts.slice(0, -1)) t = t[p];
+    const k = parts[parts.length - 1];
+    if (op.op === "remove") Array.isArray(t) ? t.splice(+k, 1) : delete t[k];
+    else if (op.op === "add" && Array.isArray(t)) k === "-" ? t.push(op.value) : t.splice(+k, 0, op.value);
+    else t[k] = op.value;
+  }
+  return doc;
+}
+
+function addMsg(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls; d.textContent = text;
+  $("log").appendChild(d); $("log").scrollTop = 1e9; return d;
+}
+
+function renderRoute() {
+  const stops = Array.isArray(state.route) ? state.route : [];
+  const box = $("routebox"); box.innerHTML = "";
+  if (!stops.length) { box.innerHTML = '<p class="empty">No route yet.</p>'; return; }
+  const ol = document.createElement("ol"); ol.id = "route";
+  for (const s of stops) {
+    const li = document.createElement("li");
+    li.textContent = s.name || "…";
+    const small = document.createElement("small"); small.textContent = s.reason || "";
+    li.appendChild(small); ol.appendChild(li);
+  }
+  box.appendChild(ol);
+}
+
+const toolEls = {};
+function toolEvent(id, text, done) {
+  const list = $("tools");
+  if (list.querySelector(".empty")) list.innerHTML = "";
+  let li = toolEls[id];
+  if (!li) { li = toolEls[id] = document.createElement("li"); li.innerHTML = '<span class="dot"></span><span></span>'; list.appendChild(li); }
+  li.lastChild.textContent = text; li.classList.toggle("done", !!done);
+}
+
+function handle(ev, ctx) {
+  switch (ev.type) {
+    case "TEXT_MESSAGE_START": ctx.el = addMsg("bot", ""); ctx.text = ""; break;
+    case "TEXT_MESSAGE_CONTENT":
+      if (!ctx.el) { ctx.el = addMsg("bot", ""); ctx.text = ""; }
+      ctx.text += ev.delta; ctx.el.textContent = ctx.text; $("log").scrollTop = 1e9; break;
+    case "TEXT_MESSAGE_END": if (ctx.text) ctx.assistant.push(ctx.text); ctx.el = null; break;
+    case "TOOL_CALL_START": ctx.tools[ev.toolCallId] = ev.toolCallName; toolEvent(ev.toolCallId, "TOOL_CALL_START  " + ev.toolCallName, false); break;
+    case "TOOL_CALL_END": toolEvent(ev.toolCallId, "TOOL_CALL_END    " + (ctx.tools[ev.toolCallId] || ""), true); break;
+    case "STATE_SNAPSHOT": state = ev.snapshot || {}; renderRoute(); break;
+    case "STATE_DELTA": state = applyPatch(state, ev.delta); renderRoute(); break;
+    case "RUN_ERROR": addMsg("bot err", ev.message || "Run failed."); break;
+  }
+}
+
+async function run(text) {
+  messages.push({ id: crypto.randomUUID(), role: "user", content: text });
+  addMsg("user", text);
+  $("send").disabled = true;
+  const ctx = { tools: {}, assistant: [], el: null, text: "" };
+  try {
+    const res = await fetch("/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ threadId, runId: crypto.randomUUID(), messages, state, tools: [], context: [], forwardedProps: {} }),
+    });
+    if (!res.ok) {
+      let msg = "Request failed (" + res.status + ")";
+      try { msg = (await res.json()).detail || msg; } catch (_) {}
+      addMsg("bot err", msg); messages.pop(); return;
+    }
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        const data = frame.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+        if (data) { try { handle(JSON.parse(data), ctx); } catch (e) { console.error(e); } }
+      }
+    }
+    for (const t of ctx.assistant) messages.push({ id: crypto.randomUUID(), role: "assistant", content: t });
+  } catch (e) {
+    addMsg("bot err", "Network error: " + e.message);
+  } finally { $("send").disabled = false; }
+}
+
+$("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const t = $("input").value.trim(); if (!t) return;
+  $("input").value = ""; run(t);
+});
+</script>
+</body>
+</html>
