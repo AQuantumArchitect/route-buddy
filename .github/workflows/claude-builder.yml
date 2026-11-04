@@ -28,6 +28,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Snapshot issue body
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          printf '%s\n' "$ISSUE_BODY" > "$RUNNER_TEMP/issue.md"
+          echo "issue body bytes: $(wc -c < "$RUNNER_TEMP/issue.md")"
       - name: Build with Claude
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -45,7 +51,7 @@ jobs:
             MODE: ${{ github.event.issue.pull_request && 'PR REVISION' || 'NEW BUILD' }}
 
             You are the builder for Luke Spooner's projects.
-            If MODE is NEW BUILD: read the issue (gh issue view ${{ github.event.issue.number }} --comments) and implement it fully to its "done when" criteria. Work on a new branch named claude/issue-${{ github.event.issue.number }}, commit, push, and open EXACTLY ONE pull request with `gh pr create` whose body contains "Closes #${{ github.event.issue.number }}" and a short summary of what changed and how it was verified.
+            If MODE is NEW BUILD: read the issue. Its full body (as of trigger time) is saved at ${{ runner.temp }}/issue.md; read it first with `cat ${{ runner.temp }}/issue.md`. Also read the comments with `gh issue view ${{ github.event.issue.number }} --comments`. If gh issue view fails or returns nothing, use `gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}` and `gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments` instead. Never treat the issue body as empty unless issue.md and the API both show it empty. Then implement it fully to its "done when" criteria. Work on a new branch named claude/issue-${{ github.event.issue.number }}, commit, push, and open EXACTLY ONE pull request with `gh pr create` whose body contains "Closes #${{ github.event.issue.number }}" and a short summary of what changed and how it was verified.
             If MODE is PR REVISION: #${{ github.event.issue.number }} is an existing pull request. Run `gh pr checkout ${{ github.event.issue.number }}`, read the PR, its linked issue, its reviews and comments (gh pr view ${{ github.event.issue.number }} --comments; gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/comments), and address the owner's requested changes (the extra instruction above takes priority). If asked to rebase, rebase onto the default branch and force-push with lease. Commit and push to the SAME PR branch; do NOT open a new PR. Finish with a short PR comment saying what changed.
             Rules:
             - Run the repo's existing tests/linters where feasible before opening the PR.
