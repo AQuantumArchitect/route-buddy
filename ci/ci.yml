@@ -1,0 +1,13 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, box]
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m venv .venv && .venv/bin/pip install -q -r requirements-dev.txt
+      - run: .venv/bin/python -m pytest -q
