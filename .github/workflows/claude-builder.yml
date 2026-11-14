@@ -34,11 +34,49 @@ jobs:
         run: |
           printf '%s\n' "$ISSUE_BODY" > "$RUNNER_TEMP/issue.md"
           echo "issue body bytes: $(wc -c < "$RUNNER_TEMP/issue.md")"
+      - name: Refuse fork PR branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "issues" ]; then
+            echo "Issue event; fork guard is a no-op."
+            exit 0
+          fi
+          if [ "${EVENT_NAME}" = "issue_comment" ] && [ "${ISSUE_PR}" != "true" ]; then
+            echo "Comment on an issue, not a PR; fork guard is a no-op."
+            exit 0
+          fi
+          case "${EVENT_NAME}" in
+            issue_comment|pull_request_review|pull_request_review_comment)
+              ;;
+            *)
+              echo "Event ${EVENT_NAME} is not a PR-comment path; fork guard is a no-op."
+              exit 0
+              ;;
+          esac
+          if [ -z "${PR_NUMBER}" ] || [ "${PR_NUMBER}" = "null" ]; then
+            echo "::error::Fork guard could not determine a PR number for event ${EVENT_NAME}."
+            exit 1
+          fi
+          INFO=$(gh pr view "${PR_NUMBER}" -R "${REPO}" --json isCrossRepository,headRepositoryOwner)
+          CROSS=$(printf '%s' "${INFO}" | jq -r '.isCrossRepository')
+          OWNER=$(printf '%s' "${INFO}" | jq -r '.headRepositoryOwner.login // "unknown"')
+          if [ "${CROSS}" = "true" ]; then
+            echo "::error::Refusing to run Claude Builder on fork PR #${PR_NUMBER} (head owner: ${OWNER}). restrict_untrusted_prs is off, so fork branches are not allowed."
+            exit 1
+          fi
+          echo "PR #${PR_NUMBER} is not a cross-repository fork (head owner: ${OWNER}); continuing."
       - name: Build with Claude
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          restrict_untrusted_prs: "false"
           claude_args: |
             --model ${{ contains(github.event.issue.labels.*.name, 'agent:opus') && 'opus' || 'sonnet' }}
             --max-turns ${{ contains(github.event.issue.labels.*.name, 'agent:opus') && '120' || '60' }}
