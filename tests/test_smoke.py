@@ -52,3 +52,67 @@ def test_rate_limit(monkeypatch):
     codes = [c.post("/agent", json={}).status_code for _ in range(3)]
     assert codes[-1] == 429 and 429 not in codes[:2]
     ratelimit._hits.clear()
+
+
+DAILY_MSG = "Route Buddy is resting for today. Try again tomorrow."
+
+
+def _reset_limits(monkeypatch, daily, per_ip=100):
+    from app import ratelimit
+    monkeypatch.setattr(ratelimit, "LIMIT", per_ip)
+    monkeypatch.setattr(ratelimit, "DAILY_LIMIT", daily)
+    ratelimit._hits.clear()
+    ratelimit._daily.clear()
+    return ratelimit
+
+
+def _post(c, ip):
+    return c.post("/agent", json={}, headers={"x-forwarded-for": ip})
+
+
+def test_daily_cap_across_ips(monkeypatch):
+    _reset_limits(monkeypatch, 2)
+    c = TestClient(app)
+    assert _post(c, "1.1.1.1").status_code != 429
+    assert _post(c, "2.2.2.2").status_code != 429
+    r = _post(c, "3.3.3.3")
+    assert r.status_code == 429 and r.json()["detail"] == DAILY_MSG
+    assert c.get("/health").status_code == 200
+
+
+def test_daily_zero_kill_switch(monkeypatch):
+    _reset_limits(monkeypatch, 0)
+    r = _post(TestClient(app), "1.1.1.1")
+    assert r.status_code == 429 and r.json()["detail"] == DAILY_MSG
+
+
+def test_ip_limited_requests_do_not_spend_daily(monkeypatch):
+    rl = _reset_limits(monkeypatch, 5, per_ip=1)
+    c = TestClient(app)
+    codes = [_post(c, "1.1.1.1").status_code for _ in range(4)]
+    assert codes[0] != 429 and codes[1:] == [429] * 3
+    assert len(rl._daily) == 1
+
+
+def test_daily_refusal_does_not_spend_ip_budget(monkeypatch):
+    rl = _reset_limits(monkeypatch, 0)
+    _post(TestClient(app), "1.1.1.1")
+    assert len(rl._hits["1.1.1.1"]) == 0
+
+
+def test_daily_window_rolls_over(monkeypatch):
+    rl = _reset_limits(monkeypatch, 1)
+    clock = [1000.0]
+    monkeypatch.setattr(rl.time, "monotonic", lambda: clock[0])
+    c = TestClient(app)
+    assert _post(c, "1.1.1.1").status_code != 429
+    assert _post(c, "2.2.2.2").status_code == 429
+    clock[0] += rl.DAY + 1
+    assert _post(c, "3.3.3.3").status_code != 429
+
+
+def test_runs_per_day_env_parsing(monkeypatch):
+    from app import ratelimit
+    for raw, want in [("", 200), ("abc", 200), ("-3", 200), ("0", 0), ("7", 7)]:
+        monkeypatch.setenv("RUNS_PER_DAY", raw)
+        assert ratelimit._runs_per_day() == want

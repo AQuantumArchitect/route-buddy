@@ -39,6 +39,7 @@ set -a; . ./.env; set +a
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` |
 | `MAX_TOKENS_PER_RUN` | `1024` |
 | `RUNS_PER_IP_PER_HOUR` | `10` |
+| `RUNS_PER_DAY` | `200` (global cap across all IPs, rolling 24h; `0` refuses every run; in-memory, single instance) |
 | `LIKELOCAL_URL` | `https://likelocal-production.up.railway.app` |
 
 ## Deploy
