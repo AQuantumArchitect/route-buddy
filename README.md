@@ -2,6 +2,8 @@
 
 A tiny walking-route assistant built on Microsoft Agent Framework (Python) and served over the AG-UI protocol, using public likelocal data. Powered by Claude Haiku.
 
+Portfolio handoff: [docs/portfolio-handoff.md](docs/portfolio-handoff.md)
+
 Ask for a walk ("a fun walk in Austin") and watch the tool calls and the route build up live.
 
 ## Event flow
