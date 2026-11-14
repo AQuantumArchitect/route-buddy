@@ -43,34 +43,43 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "${EVENT_NAME}" = "issues" ]; then
-            echo "Issue event; fork guard is a no-op."
-            exit 0
-          fi
-          if [ "${EVENT_NAME}" = "issue_comment" ] && [ "${ISSUE_PR}" != "true" ]; then
-            echo "Comment on an issue, not a PR; fork guard is a no-op."
-            exit 0
-          fi
+          # Fail closed: Claude runs on a PR only when the lookup positively
+          # confirms the PR head lives in this same repository.
           case "${EVENT_NAME}" in
-            issue_comment|pull_request_review|pull_request_review_comment)
+            issues|issue_comment)
+              if [ "${ISSUE_PR}" != "true" ]; then
+                echo "Event ${EVENT_NAME} is on a plain issue, not a PR; no PR branch to guard."
+                exit 0
+              fi
+              ;;
+            pull_request_review|pull_request_review_comment)
               ;;
             *)
-              echo "Event ${EVENT_NAME} is not a PR-comment path; fork guard is a no-op."
-              exit 0
+              echo "::error::Fork guard does not recognise event ${EVENT_NAME}; refusing to run."
+              exit 1
               ;;
           esac
-          if [ -z "${PR_NUMBER}" ] || [ "${PR_NUMBER}" = "null" ]; then
-            echo "::error::Fork guard could not determine a PR number for event ${EVENT_NAME}."
+          case "${PR_NUMBER}" in
+            ''|null|*[!0-9]*)
+              echo "::error::Fork guard could not determine a PR number for event ${EVENT_NAME}; refusing to run."
+              exit 1
+              ;;
+          esac
+          if [ -z "${REPO}" ]; then
+            echo "::error::Fork guard could not determine the repository; refusing to run."
             exit 1
           fi
-          INFO=$(gh pr view "${PR_NUMBER}" -R "${REPO}" --json isCrossRepository,headRepositoryOwner)
-          CROSS=$(printf '%s' "${INFO}" | jq -r '.isCrossRepository')
-          OWNER=$(printf '%s' "${INFO}" | jq -r '.headRepositoryOwner.login // "unknown"')
-          if [ "${CROSS}" = "true" ]; then
-            echo "::error::Refusing to run Claude Builder on fork PR #${PR_NUMBER} (head owner: ${OWNER}). restrict_untrusted_prs is off, so fork branches are not allowed."
+          if ! INFO=$(gh pr view "${PR_NUMBER}" -R "${REPO}" --json isCrossRepository,headRepository,headRepositoryOwner); then
+            echo "::error::Fork guard could not look up PR #${PR_NUMBER}; refusing to run."
             exit 1
           fi
-          echo "PR #${PR_NUMBER} is not a cross-repository fork (head owner: ${OWNER}); continuing."
+          CROSS=$(printf '%s' "${INFO}" | jq -r 'if (.isCrossRepository | type) == "boolean" then (.isCrossRepository | tostring) else "missing" end') || CROSS="missing"
+          HEAD_REPO=$(printf '%s' "${INFO}" | jq -r '.headRepository.nameWithOwner // (if ((.headRepositoryOwner.login // "") != "" and (.headRepository.name // "") != "") then (.headRepositoryOwner.login + "/" + .headRepository.name) else "" end)') || HEAD_REPO=""
+          if [ "${CROSS}" != "false" ] || [ -z "${HEAD_REPO}" ] || [ "${HEAD_REPO}" = "null" ] || [ "${HEAD_REPO}" != "${REPO}" ]; then
+            echo "::error::Refusing to run Claude Builder on PR #${PR_NUMBER}: isCrossRepository=${CROSS}, head repo=${HEAD_REPO:-unknown}, expected ${REPO}. restrict_untrusted_prs is off, so only same-repo PR branches are allowed."
+            exit 1
+          fi
+          echo "PR #${PR_NUMBER} head repo ${HEAD_REPO} matches ${REPO}; continuing."
       - name: Build with Claude
         id: claude
         uses: anthropics/claude-code-action@v1
